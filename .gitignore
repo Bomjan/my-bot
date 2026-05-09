@@ -1,0 +1,5 @@
+credentials.json
+gcit_events.ics
+__pycache__/
+*.pyc
+.env
