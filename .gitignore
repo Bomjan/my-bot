@@ -1,5 +1,8 @@
 credentials.json
+google_credentials.json
+token.json
 gcit_events.ics
+cron.log
 __pycache__/
 *.pyc
 .env

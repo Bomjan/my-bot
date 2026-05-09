@@ -1,12 +1,21 @@
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+
 VLE_URL = "https://vle.gcit.edu.bt"
 CREDENTIALS_FILE = Path(__file__).parent / "credentials.json"
 OUTPUT_ICS = Path(__file__).parent / "gcit_events.ics"
+GOOGLE_CREDS_FILE = Path(__file__).parent / "google_credentials.json"
+TOKEN_FILE = Path(__file__).parent / "token.json"
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def load_credentials():
@@ -21,6 +30,68 @@ def load_credentials():
         print("Please update credentials.json with your actual VLE credentials.")
         exit(1)
     return creds
+
+
+def get_calendar_service():
+    creds = None
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not GOOGLE_CREDS_FILE.exists():
+                print("\ngoogle_credentials.json not found.")
+                print("Follow SETUP.md to create it, then re-run.")
+                exit(1)
+            flow = InstalledAppFlow.from_client_secrets_file(str(GOOGLE_CREDS_FILE), SCOPES)
+            creds = flow.run_local_server(port=0)
+        TOKEN_FILE.write_text(creds.to_json())
+    return build("calendar", "v3", credentials=creds)
+
+
+def sync_to_google_calendar(events: list[dict]):
+    service = get_calendar_service()
+
+    print("\nSyncing to Google Calendar...")
+    added = 0
+    updated = 0
+
+    for ev in events:
+        uid = f"vle-gcit-{ev.get('id', abs(hash(ev['title'])))}"
+        start = ev["start"].isoformat()
+        end = ev["end"].isoformat()
+
+        gcal_event = {
+            "summary": ev["title"],
+            "description": ev.get("description", "") + (f"\n\n{ev['url']}" if ev.get("url") else ""),
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+            "iCalUID": uid + "@vle.gcit.edu.bt",
+            "source": {"title": "GCIT VLE", "url": ev.get("url", VLE_URL)},
+        }
+
+        # Check if event already exists by iCalUID
+        existing = service.events().list(
+            calendarId="primary",
+            iCalUID=uid + "@vle.gcit.edu.bt",
+        ).execute().get("items", [])
+
+        if existing:
+            service.events().update(
+                calendarId="primary",
+                eventId=existing[0]["id"],
+                body=gcal_event,
+            ).execute()
+            updated += 1
+        else:
+            service.events().insert(
+                calendarId="primary",
+                body=gcal_event,
+            ).execute()
+            added += 1
+
+    print(f"  {added} event(s) added, {updated} event(s) updated.")
 
 
 def to_ics_datetime(dt: datetime) -> str:
@@ -76,23 +147,16 @@ async def fetch_events(username: str, password: str) -> list[dict]:
 
         print("Logged in successfully. Fetching calendar events...")
 
-        # Moodle exposes upcoming events via its calendar JSON endpoint
         now = datetime.now(timezone.utc)
         timestamp = int(now.timestamp())
-        # Fetch events for the next 90 days
-        api_url = (
-            f"{VLE_URL}/lib/ajax/service.php?sesskey="
-        )
+        api_url = f"{VLE_URL}/lib/ajax/service.php?sesskey="
 
-        # Get sesskey from the page
         sesskey = await page.evaluate(
             "() => window.M && window.M.cfg ? window.M.cfg.sesskey : null"
         )
 
         if not sesskey:
-            # Fallback: parse from page source
             content = await page.content()
-            import re
             match = re.search(r'"sesskey":"([^"]+)"', content)
             sesskey = match.group(1) if match else None
 
@@ -173,10 +237,15 @@ async def main():
     for ev in events:
         print(f"  - {ev['title']} | {ev['start'].strftime('%Y-%m-%d %H:%M UTC')}")
 
+    # Save .ics backup
     ics_content = build_ics(events)
     OUTPUT_ICS.write_text(ics_content)
-    print(f"\nCalendar saved to: {OUTPUT_ICS}")
-    print("Import gcit_events.ics into Google Calendar, Apple Calendar, or Outlook.")
+    print(f"\nCalendar backup saved to: {OUTPUT_ICS}")
+
+    # Sync to Google Calendar
+    sync_to_google_calendar(events)
+    print("\nDone! Your Google Calendar is up to date.")
+    print("Make sure Google Calendar is synced on your phone to see the events.")
 
 
 if __name__ == "__main__":
