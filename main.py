@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -16,6 +17,18 @@ OUTPUT_ICS = Path(__file__).parent / "gcit_events.ics"
 GOOGLE_CREDS_FILE = Path(__file__).parent / "google_credentials.json"
 TOKEN_FILE = Path(__file__).parent / "token.json"
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+
+def strip_html(html: str) -> str:
+    class _Stripper(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+        def handle_data(self, data):
+            self.parts.append(data)
+    s = _Stripper()
+    s.feed(html)
+    return " ".join(s.parts).strip()
 
 
 def load_credentials():
@@ -62,13 +75,21 @@ def sync_to_google_calendar(events: list[dict]):
         start = ev["start"].isoformat()
         end = ev["end"].isoformat()
 
+        description = strip_html(ev.get("description", ""))
+        if ev.get("url"):
+            description += f"\n\n{ev['url']}"
+
         gcal_event = {
             "summary": ev["title"],
-            "description": ev.get("description", "") + (f"\n\n{ev['url']}" if ev.get("url") else ""),
+            "description": description.strip(),
             "start": {"dateTime": start, "timeZone": "UTC"},
             "end": {"dateTime": end, "timeZone": "UTC"},
             "iCalUID": uid + "@vle.gcit.edu.bt",
             "source": {"title": "GCIT VLE", "url": ev.get("url", VLE_URL)},
+            "reminders": {
+                "useDefault": False,
+                "overrides": [{"method": "popup", "minutes": 120}],
+            },
         }
 
         # Check if event already exists by iCalUID
